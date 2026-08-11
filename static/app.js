@@ -1,4 +1,5 @@
-const $ = (s) => document.querySelector(s);
+
+const $ = s => document.querySelector(s);
 
 const chatEl = $("#chat");
 const input = $("#input");
@@ -12,1543 +13,1466 @@ let currentId = null;
 let messages = [];
 let attachments = [];
 let busy = false;
+let activeController = null;
 
 function loadChats() {
-  try {
-    return JSON.parse(localStorage.getItem(KEY) || "[]");
-  } catch {
-    return [];
-  }
+    try {
+        return JSON.parse(localStorage.getItem(KEY) || "[]");
+    } catch {
+        return [];
+    }
 }
 
 function saveChats() {
-  localStorage.setItem(KEY, JSON.stringify(chats));
-
-  const state = $("#saveState");
-  if (state) state.textContent = "Saved locally";
+    try {
+        localStorage.setItem(KEY, JSON.stringify(chats));
+        const state = $("#saveState");
+        if (state) state.textContent = "Saved locally";
+    } catch (e) {
+        console.warn("Could not save chats:", e);
+    }
 }
 
 function uid() {
-  if (window.crypto?.randomUUID) {
-    return crypto.randomUUID();
-  }
-
-  return (
-    Date.now() +
-    "-" +
-    Math.random().toString(16).slice(2)
-  );
+    try {
+        if (crypto?.randomUUID) return crypto.randomUUID();
+    } catch {}
+    return Date.now() + "-" + Math.random().toString(16).slice(2);
 }
 
-function escapeHtml(s) {
-  return String(s).replace(
-    /[&<>"']/g,
-    (c) =>
-      ({
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, c => ({
         "&": "&amp;",
         "<": "&lt;",
         ">": "&gt;",
         '"': "&quot;",
-        "'": "&#039;",
-      })[c]
-  );
+        "'": "&#039;"
+    }[c]));
 }
 
-function md(s) {
-  let x = escapeHtml(s);
+/*
+ * Lightweight Markdown renderer.
+ * Never renders raw model HTML.
+ */
+function md(text) {
+    let x = escapeHtml(text ?? "");
 
-  x = x.replace(
-    /```([\s\S]*?)```/g,
-    (_, c) => `<pre><code>${c.trim()}</code></pre>`
-  );
+    x = x.replace(
+        /```([\s\S]*?)```/g,
+        (_, code) => `<pre><code>${code.trim()}</code></pre>`
+    );
 
-  x = x.replace(
-    /`([^`]+)`/g,
-    "<code>$1</code>"
-  );
+    x = x.replace(
+        /`([^`]+)`/g,
+        "<code>$1</code>"
+    );
 
-  x = x.replace(
-    /\*\*([^*]+)\*\*/g,
-    "<strong>$1</strong>"
-  );
+    x = x.replace(
+        /\*\*([^*]+)\*\*/g,
+        "<strong>$1</strong>"
+    );
 
-  x = x.replace(
-    /\*([^*]+)\*/g,
-    "<em>$1</em>"
-  );
+    x = x.replace(
+        /\*([^*]+)\*/g,
+        "<em>$1</em>"
+    );
 
-  x = x.replace(/\n/g, "<br>");
+    x = x.replace(/\n/g, "<br>");
 
-  return x;
+    return x;
 }
 
 function toast(message) {
-  const t = $("#toast");
+    const t = $("#toast");
+    if (!t) return;
 
-  if (!t) return;
+    t.textContent = message;
+    t.classList.add("show");
 
-  t.textContent = message;
-  t.classList.add("show");
+    clearTimeout(t.__timer);
 
-  setTimeout(() => {
-    t.classList.remove("show");
-  }, 2200);
+    t.__timer = setTimeout(() => {
+        t.classList.remove("show");
+    }, 2600);
 }
 
 function resize() {
-  if (!input) return;
+    if (!input) return;
 
-  input.style.height = "auto";
-  input.style.height =
-    Math.min(input.scrollHeight, 180) + "px";
+    input.style.height = "auto";
+    input.style.height =
+        Math.min(input.scrollHeight, 180) + "px";
 }
 
-if (input) {
-  input.addEventListener("input", resize);
-}
+input?.addEventListener("input", resize);
 
 function makeChat() {
-  const id = uid();
+    const id = uid();
 
-  return {
-    id,
-    title: "New chat",
-    created: Date.now(),
-    updated: Date.now(),
-    messages: [],
-  };
+    return {
+        id,
+        title: "New chat",
+        created: Date.now(),
+        updated: Date.now(),
+        messages: []
+    };
 }
 
 function current() {
-  return chats.find((c) => c.id === currentId);
+    return chats.find(c => c.id === currentId);
 }
 
 function renderHistory() {
-  const search = $("#chatSearch");
-  const box = $("#history");
+    const q = ($("#chatSearch")?.value || "").toLowerCase();
+    const box = $("#history");
 
-  if (!box) return;
+    if (!box) return;
 
-  const q = (search?.value || "").toLowerCase();
+    box.innerHTML = "";
 
-  box.innerHTML = "";
+    chats
+        .filter(c =>
+            String(c.title || "")
+                .toLowerCase()
+                .includes(q)
+        )
+        .sort((a, b) => b.updated - a.updated)
+        .forEach(c => {
+            const row = document.createElement("div");
 
-  chats
-    .filter((c) =>
-      String(c.title || "")
-        .toLowerCase()
-        .includes(q)
-    )
-    .sort((a, b) => b.updated - a.updated)
-    .forEach((c) => {
-      const row = document.createElement("div");
+            row.className =
+                "history-row" +
+                (c.id === currentId ? " active" : "");
 
-      row.className =
-        "history-row" +
-        (c.id === currentId ? " active" : "");
+            row.innerHTML = `
+                <button class="chat-item">
+                    <span class="chat-icon">▱</span>
+                    <span class="chat-title">
+                        ${escapeHtml(c.title)}
+                    </span>
+                </button>
 
-      row.innerHTML = `
-        <button class="chat-item">
-          <span class="chat-icon">▱</span>
-          <span class="chat-title">
-            ${escapeHtml(c.title)}
-          </span>
-        </button>
+                <button
+                    class="more-btn"
+                    title="Chat options"
+                >⋯</button>
+            `;
 
-        <button
-          class="more-btn"
-          title="Chat options"
-          type="button"
-        >
-          ⋯
-        </button>
-      `;
+            row.querySelector(".chat-item").onclick =
+                () => openChat(c.id);
 
-      row
-        .querySelector(".chat-item")
-        .addEventListener("click", () =>
-          openChat(c.id)
-        );
+            row.querySelector(".more-btn").onclick =
+                e => {
+                    e.stopPropagation();
+                    openMenu(e, c.id);
+                };
 
-      row
-        .querySelector(".more-btn")
-        .addEventListener("click", (e) => {
-          e.stopPropagation();
-          openMenu(e, c.id);
+            box.appendChild(row);
         });
-
-      box.appendChild(row);
-    });
 }
 
 function openMenu(e, id) {
-  const m = $("#contextMenu");
+    const menu = $("#contextMenu");
 
-  if (!m) return;
+    if (!menu) return;
 
-  m.innerHTML = `
-    <button data-act="rename" type="button">
-      ✎ Rename
-    </button>
+    menu.innerHTML = `
+        <button data-act="rename">
+            ✎ Rename
+        </button>
 
-    <button data-act="download" type="button">
-      ⇩ Download workspace
-    </button>
+        <button data-act="download">
+            ⇩ Download workspace
+        </button>
 
-    <button
-      data-act="delete"
-      class="danger"
-      type="button"
-    >
-      ⌫ Delete chat
-    </button>
-  `;
+        <button data-act="delete" class="danger">
+            ⌫ Delete chat
+        </button>
+    `;
 
-  m.style.left =
-    Math.min(
-      e.clientX,
-      window.innerWidth - 220
-    ) + "px";
+    menu.style.left =
+        Math.min(e.clientX, innerWidth - 220) + "px";
 
-  m.style.top =
-    Math.min(
-      e.clientY,
-      window.innerHeight - 150
-    ) + "px";
+    menu.style.top =
+        Math.min(e.clientY, innerHeight - 150) + "px";
 
-  m.classList.add("show");
+    menu.classList.add("show");
 
-  m.querySelector(
-    '[data-act="rename"]'
-  ).onclick = () => {
-    const c = chats.find((x) => x.id === id);
+    menu.querySelector('[data-act="rename"]').onclick = () => {
+        const chat = chats.find(x => x.id === id);
 
-    if (!c) return;
+        if (chat) {
+            const name = prompt(
+                "Rename chat",
+                chat.title
+            );
 
-    const n = prompt(
-      "Rename chat",
-      c.title
-    );
+            if (name?.trim()) {
+                chat.title = name.trim();
+                chat.updated = Date.now();
 
-    if (n?.trim()) {
-      c.title = n.trim();
-      c.updated = Date.now();
+                saveChats();
+                renderHistory();
+            }
+        }
 
-      saveChats();
-      renderHistory();
-    }
+        menu.classList.remove("show");
+    };
 
-    m.classList.remove("show");
-  };
+    menu.querySelector('[data-act="download"]').onclick = () => {
+        menu.classList.remove("show");
+        downloadChat(id);
+    };
 
-  m.querySelector(
-    '[data-act="download"]'
-  ).onclick = () => {
-    m.classList.remove("show");
-    downloadChat(id);
-  };
+    menu.querySelector('[data-act="delete"]').onclick = () => {
+        if (
+            confirm(
+                "Delete this chat from local history?"
+            )
+        ) {
+            chats = chats.filter(x => x.id !== id);
 
-  m.querySelector(
-    '[data-act="delete"]'
-  ).onclick = () => {
-    if (
-      confirm(
-        "Delete this chat from local history?"
-      )
-    ) {
-      chats = chats.filter(
-        (x) => x.id !== id
-      );
+            if (currentId === id) {
+                newChat();
+            }
 
-      if (currentId === id) {
-        newChat();
-      }
+            saveChats();
+            renderHistory();
+        }
 
-      saveChats();
-      renderHistory();
-    }
-
-    m.classList.remove("show");
-  };
+        menu.classList.remove("show");
+    };
 }
 
-document.addEventListener("click", (e) => {
-  const menu = $("#contextMenu");
-
-  if (
-    menu &&
-    !e.target.closest(
-      ".context-menu,.more-btn"
-    )
-  ) {
-    menu.classList.remove("show");
-  }
+document.addEventListener("click", e => {
+    if (
+        !e.target.closest(
+            ".context-menu,.more-btn"
+        )
+    ) {
+        $("#contextMenu")?.classList.remove("show");
+    }
 });
 
 function renderMessages() {
-  if (!chatEl) return;
+    if (!chatEl) return;
 
-  chatEl.innerHTML = "";
+    chatEl.innerHTML = "";
 
-  if (!messages.length) {
-    chatEl.innerHTML = `
-      <div class="hero" id="hero">
-        <div class="hero-orb">✦</div>
+    if (!messages.length) {
+        chatEl.innerHTML = `
+            <div class="hero" id="hero">
+                <div class="hero-orb">✦</div>
 
-        <h1>What will you build?</h1>
+                <h1>What will you build?</h1>
 
-        <p>
-          Chat, upload files, create outputs,
-          and export the entire workspace.
-        </p>
+                <p>
+                    Chat, upload files, create outputs,
+                    and export the entire workspace.
+                </p>
 
-        <div class="suggestions">
+                <div class="suggestions">
 
-          <button
-            data-prompt="Analyze my project architecture and suggest improvements."
-            type="button"
-          >
-            Analyze architecture
-          </button>
+                    <button
+                        data-prompt="Analyze my project architecture and suggest improvements."
+                    >
+                        Analyze architecture
+                    </button>
 
-          <button
-            data-prompt="Review my code and find bugs."
-            type="button"
-          >
-            Review code
-          </button>
+                    <button
+                        data-prompt="Review my code and find bugs."
+                    >
+                        Review code
+                    </button>
 
-          <button
-            data-prompt="Create a practical step-by-step plan."
-            type="button"
-          >
-            Make a plan
-          </button>
+                    <button
+                        data-prompt="Create a practical step-by-step plan."
+                    >
+                        Make a plan
+                    </button>
 
-          <button
-            data-prompt="Create a downloadable Markdown report from this conversation."
-            type="button"
-          >
-            Create report
-          </button>
+                    <button
+                        data-prompt="Create a downloadable Markdown report from this conversation."
+                    >
+                        Create report
+                    </button>
 
-        </div>
-      </div>
-    `;
+                </div>
+            </div>
+        `;
 
-    bindSuggestions();
-    return;
-  }
+        bindSuggestions();
+        return;
+    }
 
-  messages.forEach((m) => {
-    addMessage(
-      m.role,
-      m.content,
-      false
-    );
-  });
+    messages.forEach(m => {
+        addMessage(
+            m.role,
+            m.content,
+            false
+        );
+    });
 
-  chatEl.scrollTop =
-    chatEl.scrollHeight;
+    chatEl.scrollTop = chatEl.scrollHeight;
 }
 
-function addMessage(
-  role,
-  text,
-  scroll = true
-) {
-  $("#hero")?.remove();
+function addMessage(role, text, scroll = true) {
+    $("#hero")?.remove();
 
-  const row =
-    document.createElement("div");
+    const row =
+        document.createElement("div");
 
-  row.className =
-    `msg-row ${role}`;
+    row.className =
+        `msg-row ${role}`;
 
-  const av =
-    document.createElement("div");
+    const avatar =
+        document.createElement("div");
 
-  av.className = "avatar";
+    avatar.className = "avatar";
 
-  av.textContent =
-    role === "user"
-      ? "You"
-      : "✦";
+    avatar.textContent =
+        role === "user"
+            ? "You"
+            : "✦";
 
-  const bubble =
-    document.createElement("div");
+    const bubble =
+        document.createElement("div");
 
-  bubble.className = "bubble";
+    bubble.className = "bubble";
 
-  bubble.innerHTML = md(text);
+    bubble.innerHTML =
+        md(text);
 
-  row.append(av, bubble);
+    row.append(
+        avatar,
+        bubble
+    );
 
-  chatEl.appendChild(row);
+    chatEl.appendChild(row);
 
-  if (scroll) {
-    chatEl.scrollTop =
-      chatEl.scrollHeight;
-  }
+    if (scroll) {
+        chatEl.scrollTop =
+            chatEl.scrollHeight;
+    }
 
-  return {
-    row,
-    bubble,
-  };
+    return {
+        row,
+        bubble
+    };
 }
 
 function addTool(name, result) {
-  const row =
-    document.createElement("div");
+    const row =
+        document.createElement("div");
 
-  row.className =
-    "msg-row tool-row";
+    row.className =
+        "msg-row tool-row";
 
-  row.innerHTML = `
-    <div class="avatar">⚙</div>
+    row.innerHTML = `
+        <div class="avatar">⚙</div>
 
-    <div class="bubble">
+        <div class="bubble">
 
-      <div class="tool-card">
+            <div class="tool-card">
 
-        <b>
-          ⚙ ${escapeHtml(name)}
-        </b>
+                <b>
+                    ⚙ ${escapeHtml(name)}
+                </b>
 
-        <span>
-          ${escapeHtml(
-            String(result || "")
-          ).slice(0, 900)}
-        </span>
+                <span>
+                    ${escapeHtml(result).slice(0, 900)}
+                </span>
 
-      </div>
+            </div>
 
-    </div>
-  `;
+        </div>
+    `;
 
-  chatEl.appendChild(row);
+    chatEl.appendChild(row);
 
-  chatEl.scrollTop =
-    chatEl.scrollHeight;
+    chatEl.scrollTop =
+        chatEl.scrollHeight;
 }
 
 function newChat() {
-  const c = makeChat();
+    if (activeController) {
+        try {
+            activeController.abort();
+        } catch {}
+    }
 
-  chats.unshift(c);
+    const c = makeChat();
 
-  currentId = c.id;
+    chats.unshift(c);
 
-  messages = [];
-  attachments = [];
+    currentId = c.id;
 
-  renderMessages();
-  renderAttachments();
-  renderHistory();
+    messages = [];
+    attachments = [];
 
-  saveChats();
+    renderMessages();
+    renderAttachments();
+    renderHistory();
 
-  $("#sidebar")?.classList.remove(
-    "open"
-  );
+    saveChats();
 
-  input?.focus();
+    $("#sidebar")?.classList.remove("open");
+
+    input?.focus();
 }
 
 function openChat(id) {
-  const c = chats.find(
-    (x) => x.id === id
-  );
+    const c =
+        chats.find(x => x.id === id);
 
-  if (!c) return;
+    if (!c) return;
 
-  currentId = id;
+    currentId = id;
 
-  messages = c.messages || [];
-  attachments = [];
+    messages =
+        Array.isArray(c.messages)
+            ? c.messages
+            : [];
 
-  renderMessages();
-  renderAttachments();
-  renderHistory();
+    attachments = [];
 
-  $("#sidebar")?.classList.remove(
-    "open"
-  );
+    renderMessages();
+    renderAttachments();
+    renderHistory();
+
+    $("#sidebar")?.classList.remove("open");
 }
 
 function updateCurrent() {
-  const c = current();
+    const c = current();
 
-  if (!c) return;
+    if (!c) return;
 
-  c.messages = messages;
-  c.updated = Date.now();
+    c.messages = messages;
+    c.updated = Date.now();
 
-  if (
-    messages.length &&
-    c.title === "New chat"
-  ) {
-    const first =
-      messages.find(
-        (m) => m.role === "user"
-      )?.content ||
-      "New chat";
+    if (
+        messages.length &&
+        c.title === "New chat"
+    ) {
+        const first =
+            messages.find(
+                m => m.role === "user"
+            )?.content ||
+            "New chat";
 
-    c.title = first
-      .replace(/\s+/g, " ")
-      .slice(0, 52);
-  }
+        c.title =
+            first
+                .replace(/\s+/g, " ")
+                .slice(0, 52);
+    }
 
-  saveChats();
-  renderHistory();
+    saveChats();
+    renderHistory();
 }
 
 async function loadModels() {
-  try {
-    const r =
-      await fetch(
-        "/api/models",
-        {
-          method: "GET",
-          cache: "no-store",
-          headers: {
-            Accept:
-              "application/json",
-          },
+    try {
+        const r =
+            await fetch(
+                "/api/models",
+                {
+                    cache: "no-store"
+                }
+            );
+
+        if (!r.ok) {
+            throw new Error(
+                `HTTP ${r.status}`
+            );
         }
-      );
 
-    if (!r.ok) {
-      throw new Error(
-        `HTTP ${r.status}`
-      );
+        const d =
+            await r.json();
+
+        modelSelect.innerHTML = "";
+
+        const models =
+            Array.isArray(d.models)
+                ? d.models
+                : [];
+
+        models.forEach(model => {
+            const option =
+                document.createElement("option");
+
+            option.value = model;
+            option.textContent = model;
+
+            modelSelect.appendChild(option);
+        });
+
+        const preferred =
+            models.find(
+                m =>
+                    m
+                        .toLowerCase()
+                        .includes("luna")
+            ) ||
+            models[0];
+
+        if (preferred) {
+            modelSelect.value =
+                preferred;
+        }
+
+    } catch (e) {
+        console.error(
+            "Model loading failed:",
+            e
+        );
+
+        toast(
+            "Could not load models"
+        );
     }
-
-    const d = await r.json();
-
-    modelSelect.innerHTML = "";
-
-    (d.models || []).forEach(
-      (m) => {
-        const o =
-          document.createElement(
-            "option"
-          );
-
-        o.value = m;
-        o.textContent = m;
-
-        modelSelect.appendChild(o);
-      }
-    );
-
-    const preferred =
-      (d.models || []).find(
-        (m) =>
-          m
-            .toLowerCase()
-            .includes("luna")
-      ) ||
-      d.models?.[0];
-
-    if (preferred) {
-      modelSelect.value =
-        preferred;
-    }
-  } catch (e) {
-    console.error(
-      "Model loading failed:",
-      e
-    );
-
-    toast(
-      "Could not load models"
-    );
-  }
 }
 
 async function health() {
-  try {
-    const r =
-      await fetch(
-        "/api/health",
-        {
-          method: "GET",
-          cache: "no-store",
-          headers: {
-            Accept:
-              "application/json",
-          },
+    try {
+        const r =
+            await fetch(
+                "/api/health",
+                {
+                    cache: "no-store"
+                }
+            );
+
+        if (!r.ok) {
+            throw new Error();
         }
-      );
 
-    if (!r.ok) {
-      throw new Error(
-        `HTTP ${r.status}`
-      );
-    }
+        const d =
+            await r.json();
 
-    const d =
-      await r.json();
+        const configured =
+            Boolean(
+                d.api_configured
+            );
 
-    const dot =
-      $("#healthDot");
-
-    const text =
-      $("#healthText");
-
-    if (dot) {
-      dot.style.background =
-        d.api_configured
-          ? "#5eead4"
-          : "#ffb86b";
-    }
-
-    if (text) {
-      text.textContent =
-        d.api_configured
-          ? "Gateway connected"
-          : "API key missing";
-    }
-  } catch (e) {
-    console.error(
-      "Health check failed:",
-      e
-    );
-
-    const text =
-      $("#healthText");
-
-    if (text) {
-      text.textContent =
-        "Server unavailable";
-    }
-  }
-}
-
-function setBusy(v) {
-  busy = v;
-
-  if (sendBtn) {
-    sendBtn.disabled = v;
-    sendBtn.textContent =
-      v ? "…" : "➤";
-  }
-
-  if (input) {
-    input.disabled = v;
-  }
-
-  const attach =
-    $("#attachBtn");
-
-  if (attach) {
-    attach.disabled = v;
-  }
-}
-
-async function uploadFiles(
-  fileList
-) {
-  if (!currentId) {
-    newChat();
-  }
-
-  const files = [
-    ...fileList,
-  ];
-
-  if (!files.length) return;
-
-  const fd =
-    new FormData();
-
-  fd.append(
-    "chat_id",
-    currentId
-  );
-
-  files.forEach((f) =>
-    fd.append("files", f)
-  );
-
-  try {
-    const r =
-      await fetch(
-        "/api/upload",
-        {
-          method: "POST",
-          body: fd,
+        if ($("#healthDot")) {
+            $("#healthDot").style.background =
+                configured
+                    ? "#5eead4"
+                    : "#ffb86b";
         }
-      );
 
-    if (!r.ok) {
-      throw new Error(
-        await r.text()
-      );
+        if ($("#healthText")) {
+            $("#healthText").textContent =
+                configured
+                    ? "Gateway connected"
+                    : "API key missing";
+        }
+
+    } catch {
+        if ($("#healthText")) {
+            $("#healthText").textContent =
+                "Server unavailable";
+        }
     }
-
-    const d =
-      await r.json();
-
-    attachments.push(
-      ...(d.files || [])
-    );
-
-    renderAttachments();
-
-    toast(
-      `${d.files?.length || 0} file(s) uploaded`
-    );
-  } catch (e) {
-    console.error(
-      "Upload failed:",
-      e
-    );
-
-    toast(
-      "Upload failed: " +
-        e.message
-    );
-  }
 }
 
-function renderAttachments() {
-  const box =
-    $("#attachments");
+function setBusy(value) {
+    busy = value;
 
-  if (!box) return;
+    if (sendBtn) {
+        sendBtn.disabled = value;
+        sendBtn.textContent =
+            value ? "…" : "➤";
+    }
 
-  box.innerHTML = "";
+    if (input) {
+        input.disabled = value;
+    }
 
-  attachments.forEach(
-    (f, i) => {
-      const el =
-        document.createElement(
-          "div"
+    const attachBtn =
+        $("#attachBtn");
+
+    if (attachBtn) {
+        attachBtn.disabled = value;
+    }
+}
+
+async function uploadFiles(fileList) {
+    if (!currentId) return;
+
+    const files =
+        [...fileList];
+
+    if (!files.length) return;
+
+    const fd =
+        new FormData();
+
+    fd.append(
+        "chat_id",
+        currentId
+    );
+
+    files.forEach(file => {
+        fd.append(
+            "files",
+            file
         );
+    });
 
-      el.className =
-        "attachment";
+    try {
+        const r =
+            await fetch(
+                "/api/upload",
+                {
+                    method: "POST",
+                    body: fd
+                }
+            );
 
-      el.innerHTML = `
-        <span>📎</span>
+        if (!r.ok) {
+            throw new Error(
+                await r.text()
+            );
+        }
 
-        <span>
-          ${escapeHtml(
-            f.name
-          )}
-        </span>
+        const d =
+            await r.json();
 
-        <button
-          title="Remove"
-          type="button"
-        >
-          ×
-        </button>
-      `;
-
-      el.querySelector(
-        "button"
-      ).onclick = () => {
-        attachments.splice(
-          i,
-          1
+        attachments.push(
+            ...(d.files || [])
         );
 
         renderAttachments();
-      };
 
-      box.appendChild(el);
+        toast(
+            `${d.files?.length || 0} file(s) uploaded`
+        );
+
+    } catch (e) {
+        console.error(e);
+
+        toast(
+            "Upload failed: " +
+            e.message
+        );
     }
-  );
 }
 
-function parseSSEBlock(raw) {
-  const lines =
-    raw.split(/\r?\n/);
+function renderAttachments() {
+    const box =
+        $("#attachments");
 
-  let eventName = "message";
-  const dataLines = [];
+    if (!box) return;
 
-  for (const line of lines) {
-    if (
-      line.startsWith(
-        "event:"
-      )
-    ) {
-      eventName =
-        line
-          .slice(6)
-          .trim();
+    box.innerHTML = "";
+
+    attachments.forEach(
+        (file, index) => {
+            const el =
+                document.createElement("div");
+
+            el.className =
+                "attachment";
+
+            el.innerHTML = `
+                <span>📎</span>
+                <span>
+                    ${escapeHtml(file.name)}
+                </span>
+                <button title="Remove">
+                    ×
+                </button>
+            `;
+
+            el.querySelector(
+                "button"
+            ).onclick = () => {
+                attachments.splice(
+                    index,
+                    1
+                );
+
+                renderAttachments();
+            };
+
+            box.appendChild(el);
+        }
+    );
+}
+
+/*
+ * Robust SSE parser.
+ *
+ * Supports:
+ * event: token
+ * data: {...}
+ *
+ * Handles:
+ * - chunks split in the middle of JSON
+ * - CRLF / LF
+ * - multiple SSE events in one chunk
+ * - final incomplete buffer
+ * - UTF-8 streaming
+ */
+function createSSEParser(onEvent) {
+    let buffer = "";
+
+    const decoder =
+        new TextDecoder(
+            "utf-8"
+        );
+
+    function processText(text) {
+        buffer += text;
+
+        const events =
+            buffer.split(
+                /\r?\n\r?\n/
+            );
+
+        buffer =
+            events.pop() || "";
+
+        for (
+            const raw of events
+        ) {
+            parseEvent(raw);
+        }
     }
 
-    if (
-      line.startsWith(
-        "data:"
-      )
-    ) {
-      dataLines.push(
-        line
-          .slice(5)
-          .trimStart()
-      );
+    function parseEvent(raw) {
+        if (!raw.trim()) return;
+
+        let eventName = "message";
+        let dataLines = [];
+
+        const lines =
+            raw.split(/\r?\n/);
+
+        for (const line of lines) {
+            if (
+                line.startsWith(
+                    "event:"
+                )
+            ) {
+                eventName =
+                    line
+                        .slice(6)
+                        .trim();
+            } else if (
+                line.startsWith(
+                    "data:"
+                )
+            ) {
+                dataLines.push(
+                    line
+                        .slice(5)
+                        .trimStart()
+                );
+            }
+        }
+
+        if (!dataLines.length) {
+            return;
+        }
+
+        const rawData =
+            dataLines.join("\n");
+
+        let data;
+
+        try {
+            data =
+                JSON.parse(rawData);
+        } catch {
+            /*
+             * Ignore malformed/incomplete
+             * SSE payloads rather than
+             * killing the entire stream.
+             */
+            console.warn(
+                "Ignored malformed SSE payload:",
+                rawData
+            );
+            return;
+        }
+
+        onEvent(
+            eventName,
+            data
+        );
     }
-  }
 
-  if (!dataLines.length) {
-    return null;
-  }
+    return {
+        push(value) {
+            processText(
+                decoder.decode(
+                    value,
+                    {
+                        stream: true
+                    }
+                )
+            );
+        },
 
-  const rawData =
-    dataLines.join("\n");
+        finish() {
+            const remaining =
+                decoder.decode();
 
-  let data;
+            if (remaining) {
+                processText(
+                    remaining
+                );
+            }
 
-  try {
-    data =
-      JSON.parse(rawData);
-  } catch {
-    data = {
-      text: rawData,
+            if (buffer.trim()) {
+                parseEvent(buffer);
+            }
+
+            buffer = "";
+        }
     };
-  }
-
-  return {
-    event: eventName,
-    data,
-  };
 }
 
 async function send(text) {
-  if (
-    busy ||
-    !text ||
-    !text.trim()
-  ) {
-    return;
-  }
+    if (
+        busy ||
+        !text ||
+        !text.trim()
+    ) {
+        return;
+    }
 
-  if (!currentId) {
-    newChat();
-  }
+    if (!currentId) {
+        newChat();
+    }
 
-  text = text.trim();
+    text =
+        text.trim();
 
-  const extra =
-    attachments.length
-      ? `\n\n[Attached files: ${attachments
-          .map(
-            (x) =>
-              x.stored || x.name
-          )
-          .join(", ")}]`
-      : "";
+    const extra =
+        attachments.length
+            ? `\n\n[Attached files: ${attachments
+                .map(x => x.stored)
+                .join(", ")}]`
+            : "";
 
-  addMessage(
-    "user",
-    text
-  );
-
-  messages.push({
-    role: "user",
-    content:
-      text + extra,
-  });
-
-  attachments = [];
-
-  renderAttachments();
-
-  const ai =
     addMessage(
-      "assistant",
-      ""
+        "user",
+        text
     );
-
-  ai.bubble.innerHTML =
-    '<span class="thinking">Thinking…</span>';
-
-  setBusy(true);
-
-  let answer = "";
-
-  const controller =
-    new AbortController();
-
-  const timeout =
-    setTimeout(
-      () =>
-        controller.abort(),
-      180000
-    );
-
-  try {
-    /*
-     * IMPORTANT:
-     * No SharedWorker.
-     * No Worker.
-     * No external reconnect library.
-     *
-     * Direct browser -> FastAPI SSE.
-     */
-
-    const payload = {
-      chat_id: currentId,
-      model:
-        modelSelect?.value ||
-        "",
-      messages:
-        messages,
-      tools_enabled:
-        $("#toolsToggle")
-          ?.checked !== false,
-    };
-
-    const res =
-      await fetch(
-        "/api/chat/stream",
-        {
-          method: "POST",
-
-          headers: {
-            "Content-Type":
-              "application/json",
-
-            Accept:
-              "text/event-stream",
-
-            "Cache-Control":
-              "no-cache",
-
-            "X-Requested-With":
-              "XMLHttpRequest",
-          },
-
-          cache: "no-store",
-
-          credentials: "same-origin",
-
-          signal:
-            controller.signal,
-
-          body:
-            JSON.stringify(
-              payload
-            ),
-        }
-      );
-
-    if (!res.ok) {
-      let detail = "";
-
-      try {
-        detail =
-          await res.text();
-      } catch {}
-
-      throw new Error(
-        `Server returned HTTP ${res.status}` +
-          (detail
-            ? `: ${detail.slice(
-                0,
-                700
-              )}`
-            : "")
-      );
-    }
-
-    /*
-     * If the server does not provide
-     * a readable stream, try normal
-     * JSON/text response instead.
-     */
-
-    if (!res.body) {
-      const raw =
-        await res.text();
-
-      if (!raw) {
-        throw new Error(
-          "The server returned an empty response."
-        );
-      }
-
-      try {
-        const json =
-          JSON.parse(raw);
-
-        answer =
-          json.answer ||
-          json.response ||
-          json.message ||
-          json.content ||
-          "";
-
-        if (!answer) {
-          throw new Error(
-            "No AI response was found."
-          );
-        }
-      } catch {
-        answer = raw;
-      }
-
-      ai.bubble.innerHTML =
-        md(answer);
-
-      messages.push({
-        role: "assistant",
-        content: answer,
-      });
-
-      updateCurrent();
-
-      return;
-    }
-
-    const reader =
-      res.body.getReader();
-
-    const decoder =
-      new TextDecoder(
-        "utf-8"
-      );
-
-    let buffer = "";
-
-    while (true) {
-      const {
-        value,
-        done,
-      } =
-        await reader.read();
-
-      if (done) break;
-
-      buffer += decoder.decode(
-        value,
-        {
-          stream: true,
-        }
-      );
-
-      /*
-       * SSE events are separated
-       * by a blank line.
-       */
-      const events =
-        buffer.split(
-          /\r?\n\r?\n/
-        );
-
-      buffer =
-        events.pop() || "";
-
-      for (const raw of events) {
-        const parsed =
-          parseSSEBlock(
-            raw
-          );
-
-        if (!parsed) continue;
-
-        const {
-          event,
-          data,
-        } = parsed;
-
-        /*
-         * TOKEN
-         */
-        if (
-          event === "token" ||
-          event === "message"
-        ) {
-          const token =
-            data.text ??
-            data.content ??
-            data.token ??
-            "";
-
-          if (token) {
-            answer += token;
-
-            ai.bubble.innerHTML =
-              md(answer) +
-              '<span class="cursor"></span>';
-
-            chatEl.scrollTop =
-              chatEl.scrollHeight;
-          }
-        }
-
-        /*
-         * TOOL START
-         */
-        else if (
-          event ===
-          "tool_start"
-        ) {
-          addTool(
-            data.name ||
-              "Agent tool",
-            "Running…"
-          );
-        }
-
-        /*
-         * TOOL RESULT
-         */
-        else if (
-          event ===
-          "tool_result"
-        ) {
-          addTool(
-            data.name ||
-              "Agent tool",
-            data.result ||
-              data.output ||
-              ""
-          );
-        }
-
-        /*
-         * STATUS
-         */
-        else if (
-          event === "status"
-        ) {
-          if (!answer) {
-            ai.bubble.innerHTML =
-              `<span class="thinking">${escapeHtml(
-                data.message ||
-                  data.status ||
-                  "Working…"
-              )}</span>`;
-          }
-        }
-
-        /*
-         * ERROR
-         */
-        else if (
-          event === "error"
-        ) {
-          throw new Error(
-            data.message ||
-              data.error ||
-              "The agent returned an error."
-          );
-        }
-
-        /*
-         * DONE
-         */
-        else if (
-          event === "done"
-        ) {
-          // Stream completed.
-        }
-      }
-    }
-
-    /*
-     * Flush remaining decoder data.
-     */
-    buffer +=
-      decoder.decode();
-
-    if (buffer.trim()) {
-      const parsed =
-        parseSSEBlock(
-          buffer
-        );
-
-      if (parsed) {
-        const {
-          event,
-          data,
-        } = parsed;
-
-        if (
-          event === "token" ||
-          event === "message"
-        ) {
-          const token =
-            data.text ??
-            data.content ??
-            data.token ??
-            "";
-
-          if (token) {
-            answer += token;
-          }
-        }
-
-        if (
-          event === "error"
-        ) {
-          throw new Error(
-            data.message ||
-              data.error ||
-              "The agent returned an error."
-          );
-        }
-      }
-    }
-
-    if (!answer) {
-      throw new Error(
-        "The connection closed before the AI returned a response."
-      );
-    }
-
-    ai.bubble.innerHTML =
-      md(answer);
 
     messages.push({
-      role: "assistant",
-      content: answer,
+        role: "user",
+        content: text + extra
     });
 
-    updateCurrent();
-  } catch (e) {
-    console.error(
-      "AI request failed:",
-      e
-    );
+    attachments = [];
 
-    let msg =
-      e?.name ===
-      "AbortError"
-        ? "The AI request timed out after 3 minutes."
-        : e?.message ||
-          String(e);
+    renderAttachments();
+
+    const ai =
+        addMessage(
+            "assistant",
+            ""
+        );
+
+    ai.bubble.innerHTML =
+        '<span class="thinking">Thinking…</span>';
+
+    setBusy(true);
+
+    let answer = "";
+    let finished = false;
+    let gotToken = false;
+
+    const controller =
+        new AbortController();
+
+    activeController =
+        controller;
 
     /*
-     * Make common browser/network
-     * failures understandable.
+     * Generous timeout for slow/free
+     * model gateways.
      */
-    if (
-      msg ===
-        "Failed to fetch" ||
-      msg.includes(
-        "NetworkError"
-      )
-    ) {
-      msg =
-        "Could not connect to the AI service. Please try again.";
+    const timeout =
+        setTimeout(
+            () => {
+                try {
+                    controller.abort();
+                } catch {}
+            },
+            5 * 60 * 1000
+        );
+
+    try {
+        const payload = {
+            chat_id: currentId,
+            model:
+                modelSelect.value,
+            messages,
+            tools_enabled:
+                Boolean(
+                    $("#toolsToggle")?.checked
+                )
+        };
+
+        const response =
+            await fetch(
+                "/api/chat/stream",
+                {
+                    method: "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+
+                        "Accept":
+                            "text/event-stream",
+
+                        "Cache-Control":
+                            "no-cache"
+                    },
+
+                    cache: "no-store",
+
+                    credentials:
+                        "same-origin",
+
+                    signal:
+                        controller.signal,
+
+                    body:
+                        JSON.stringify(
+                            payload
+                        )
+                }
+            );
+
+        if (!response.ok) {
+            let detail = "";
+
+            try {
+                detail =
+                    await response.text();
+            } catch {}
+
+            throw new Error(
+                `Server returned HTTP ${response.status}` +
+                (
+                    detail
+                        ? `: ${detail.slice(0, 700)}`
+                        : ""
+                )
+            );
+        }
+
+        /*
+         * Normal Railway/FastAPI path.
+         */
+        if (response.body) {
+            const reader =
+                response.body
+                    .getReader();
+
+            const parser =
+                createSSEParser(
+                    (event, data) => {
+
+                        if (
+                            event ===
+                            "token"
+                        ) {
+                            const token =
+                                String(
+                                    data?.text ||
+                                    ""
+                                );
+
+                            if (!token) {
+                                return;
+                            }
+
+                            gotToken = true;
+
+                            answer +=
+                                token;
+
+                            ai.bubble.innerHTML =
+                                md(answer) +
+                                '<span class="cursor"></span>';
+
+                            chatEl.scrollTop =
+                                chatEl.scrollHeight;
+
+                            return;
+                        }
+
+                        if (
+                            event ===
+                            "tool_start"
+                        ) {
+                            addTool(
+                                data?.name ||
+                                    "tool",
+                                "Running…"
+                            );
+
+                            return;
+                        }
+
+                        if (
+                            event ===
+                            "tool_result"
+                        ) {
+                            addTool(
+                                data?.name ||
+                                    "tool",
+                                data?.result ||
+                                    ""
+                            );
+
+                            return;
+                        }
+
+                        if (
+                            event ===
+                            "status"
+                        ) {
+                            if (!answer) {
+                                ai.bubble.innerHTML =
+                                    `<span class="thinking">${
+                                        escapeHtml(
+                                            data?.message ||
+                                            "Working…"
+                                        )
+                                    }</span>`;
+                            }
+
+                            return;
+                        }
+
+                        if (
+                            event ===
+                            "error"
+                        ) {
+                            finished = true;
+
+                            throw new Error(
+                                data?.message ||
+                                "The AI agent returned an error."
+                            );
+                        }
+
+                        if (
+                            event ===
+                            "done"
+                        ) {
+                            finished = true;
+                        }
+                    }
+                );
+
+            while (true) {
+                const {
+                    value,
+                    done
+                } =
+                    await reader.read();
+
+                if (done) {
+                    break;
+                }
+
+                if (value) {
+                    parser.push(
+                        value
+                    );
+                }
+            }
+
+            parser.finish();
+        }
+
+        /*
+         * The backend completed the
+         * request successfully.
+         */
+        if (!answer && !finished) {
+            throw new Error(
+                "The AI connection closed before a response was received."
+            );
+        }
+
+        if (!answer && finished) {
+            throw new Error(
+                "The AI completed the request but returned no text."
+            );
+        }
+
+        ai.bubble.innerHTML =
+            md(answer);
+
+        if (answer) {
+            messages.push({
+                role:
+                    "assistant",
+                content:
+                    answer
+            });
+        }
+
+        updateCurrent();
+
+    } catch (error) {
+        console.error(
+            "AI stream error:",
+            error
+        );
+
+        let message =
+            error?.message ||
+            String(error);
+
+        if (
+            error?.name ===
+            "AbortError"
+        ) {
+            message =
+                "The AI request timed out or was cancelled. Please try again.";
+        }
+
+        /*
+         * Preserve any partial answer.
+         * Do not replace it with a generic
+         * error if useful text already arrived.
+         */
+        if (
+            answer &&
+            answer.trim()
+        ) {
+            ai.bubble.innerHTML =
+                md(answer) +
+                `<div class="error-text">
+                    ${escapeHtml(
+                        message
+                    )}
+                </div>`;
+
+            messages.push({
+                role:
+                    "assistant",
+                content:
+                    answer
+            });
+
+            updateCurrent();
+
+        } else {
+            ai.bubble.innerHTML =
+                `<span class="error-text">
+                    ${escapeHtml(
+                        message
+                    )}
+                </span>`;
+
+            toast(message);
+        }
+
+    } finally {
+        clearTimeout(timeout);
+
+        if (
+            activeController ===
+            controller
+        ) {
+            activeController =
+                null;
+        }
+
+        setBusy(false);
+
+        input?.focus();
     }
-
-    ai.bubble.innerHTML = `
-      <span class="error-text">
-        ${escapeHtml(msg)}
-      </span>
-    `;
-
-    toast(msg);
-  } finally {
-    clearTimeout(timeout);
-
-    setBusy(false);
-
-    input?.focus();
-  }
 }
 
 async function downloadChat(
-  id = currentId
+    id = currentId
 ) {
-  const c =
-    chats.find(
-      (x) => x.id === id
-    );
+    const c =
+        chats.find(
+            x => x.id === id
+        );
 
-  if (!c) return;
+    if (!c) return;
 
-  try {
-    const r =
-      await fetch(
-        "/api/download",
-        {
-          method: "POST",
+    try {
+        const r =
+            await fetch(
+                "/api/download",
+                {
+                    method: "POST",
 
-          headers: {
-            "Content-Type":
-              "application/json",
-          },
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
 
-          credentials:
-            "same-origin",
+                    body:
+                        JSON.stringify({
+                            chat_id: id,
+                            title:
+                                c.title,
+                            messages:
+                                c.messages ||
+                                []
+                        })
+                }
+            );
 
-          body:
-            JSON.stringify({
-              chat_id: id,
-              title: c.title,
-              messages:
-                c.messages || [],
-            }),
+        if (!r.ok) {
+            throw new Error(
+                await r.text()
+            );
         }
-      );
 
-    if (!r.ok) {
-      throw new Error(
-        await r.text()
-      );
+        const blob =
+            await r.blob();
+
+        const url =
+            URL.createObjectURL(
+                blob
+            );
+
+        const a =
+            document.createElement(
+                "a"
+            );
+
+        a.href = url;
+
+        a.download =
+            (
+                c.title
+                    .replace(
+                        /[^\w.-]+/g,
+                        "_"
+                    ) ||
+                "AI_Canvas_Chat"
+            ) + ".zip";
+
+        document.body.appendChild(a);
+
+        a.click();
+
+        a.remove();
+
+        setTimeout(
+            () =>
+                URL.revokeObjectURL(
+                    url
+                ),
+            3000
+        );
+
+        toast(
+            "Workspace download started"
+        );
+
+    } catch (e) {
+        console.error(e);
+
+        toast(
+            "Download failed: " +
+            e.message
+        );
     }
-
-    const blob =
-      await r.blob();
-
-    const url =
-      URL.createObjectURL(
-        blob
-      );
-
-    const a =
-      document.createElement(
-        "a"
-      );
-
-    a.href = url;
-
-    a.download =
-      (
-        c.title.replace(
-          /[^\w.-]+/g,
-          "_"
-        ) ||
-        "AI_Canvas_Chat"
-      ) + ".zip";
-
-    document.body.appendChild(
-      a
-    );
-
-    a.click();
-
-    a.remove();
-
-    setTimeout(
-      () =>
-        URL.revokeObjectURL(
-          url
-        ),
-      1000
-    );
-
-    toast(
-      "Workspace download started"
-    );
-  } catch (e) {
-    console.error(
-      "Download failed:",
-      e
-    );
-
-    toast(
-      "Download failed: " +
-        e.message
-    );
-  }
 }
 
 function bindSuggestions() {
-  document
-    .querySelectorAll(
-      "[data-prompt]"
-    )
-    .forEach((b) => {
-      b.onclick = () => {
-        input.value =
-          b.dataset.prompt;
+    document
+        .querySelectorAll(
+            "[data-prompt]"
+        )
+        .forEach(button => {
+            button.onclick = () => {
+                input.value =
+                    button.dataset.prompt;
 
-        resize();
+                resize();
 
-        input.focus();
-      };
-    });
+                input.focus();
+            };
+        });
 }
 
-/* Composer */
-const composer =
-  $("#composer");
+if ($("#composer")) {
+    $("#composer").onsubmit =
+        e => {
+            e.preventDefault();
 
-if (composer) {
-  composer.onsubmit = (
-    e
-  ) => {
-    e.preventDefault();
+            const value =
+                input.value;
 
-    const value =
-      input.value;
+            input.value = "";
 
-    input.value = "";
+            resize();
 
-    resize();
-
-    send(value);
-  };
+            send(value);
+        };
 }
 
-/* Enter = send, Shift+Enter = newline */
 if (input) {
-  input.onkeydown = (
-    e
-  ) => {
-    if (
-      e.key === "Enter" &&
-      !e.shiftKey
-    ) {
-      e.preventDefault();
+    input.onkeydown =
+        e => {
+            if (
+                e.key === "Enter" &&
+                !e.shiftKey
+            ) {
+                e.preventDefault();
 
-      composer?.requestSubmit();
-    }
-  };
+                $("#composer")
+                    ?.requestSubmit();
+            }
+        };
 }
 
-/* New chat */
 $("#newChat")?.addEventListener(
-  "click",
-  newChat
+    "click",
+    newChat
 );
 
-/* Download current chat */
 $("#downloadTop")?.addEventListener(
-  "click",
-  () => downloadChat()
+    "click",
+    () => downloadChat()
 );
 
-/* Clear current chat */
 $("#clearBtn")?.addEventListener(
-  "click",
-  () => {
-    messages = [];
+    "click",
+    () => {
+        if (busy) {
+            toast(
+                "Please wait for the current response."
+            );
+            return;
+        }
 
-    updateCurrent();
+        messages = [];
 
-    renderMessages();
+        updateCurrent();
 
-    toast(
-      "Current chat cleared"
-    );
-  }
-);
+        renderMessages();
 
-/* Mobile sidebar */
-$("#menuBtn")?.addEventListener(
-  "click",
-  () =>
-    $("#sidebar")?.classList.toggle(
-      "open"
-    )
-);
-
-/* Search */
-$("#chatSearch")?.addEventListener(
-  "input",
-  renderHistory
-);
-
-/* Clear history */
-$("#clearHistory")?.addEventListener(
-  "click",
-  () => {
-    if (
-      confirm(
-        "Clear all local chat history?"
-      )
-    ) {
-      chats = [];
-
-      newChat();
-
-      saveChats();
-
-      renderHistory();
+        toast(
+            "Current chat cleared"
+        );
     }
-  }
 );
 
-/* File picker */
+$("#menuBtn")?.addEventListener(
+    "click",
+    () => {
+        $("#sidebar")
+            ?.classList.toggle(
+                "open"
+            );
+    }
+);
+
+$("#chatSearch")?.addEventListener(
+    "input",
+    renderHistory
+);
+
+$("#clearHistory")?.addEventListener(
+    "click",
+    () => {
+        if (
+            confirm(
+                "Clear all local chat history?"
+            )
+        ) {
+            chats = [];
+
+            newChat();
+
+            saveChats();
+
+            renderHistory();
+        }
+    }
+);
+
 $("#attachBtn")?.addEventListener(
-  "click",
-  () =>
-    $("#fileInput")?.click()
+    "click",
+    () => {
+        $("#fileInput")?.click();
+    }
 );
 
 $("#fileInput")?.addEventListener(
-  "change",
-  (e) => {
-    uploadFiles(
-      e.target.files
-    );
+    "change",
+    e => {
+        uploadFiles(
+            e.target.files
+        );
 
-    /*
-     * Allow selecting the
-     * same file again later.
-     */
-    e.target.value = "";
-  }
+        /*
+         * Allows selecting the same
+         * file again later.
+         */
+        e.target.value = "";
+    }
+);
+
+document.addEventListener(
+    "dragover",
+    e => {
+        e.preventDefault();
+    }
+);
+
+document.addEventListener(
+    "drop",
+    e => {
+        e.preventDefault();
+
+        if (
+            e.dataTransfer
+                ?.files
+                ?.length
+        ) {
+            uploadFiles(
+                e.dataTransfer.files
+            );
+        }
+    }
 );
 
 /*
- * Drag & Drop
- *
- * IMPORTANT:
- * No SharedWorker.
- * No ServiceWorker.
- * No Worker.
+ * Initial application boot.
  */
-document.addEventListener(
-  "dragover",
-  (e) => {
-    e.preventDefault();
-  }
-);
-
-document.addEventListener(
-  "drop",
-  (e) => {
-    e.preventDefault();
-
-    if (
-      e.dataTransfer?.files
-        ?.length
-    ) {
-      uploadFiles(
-        e.dataTransfer.files
-      );
-    }
-  }
-);
-
-/* Initialize application */
 if (!chats.length) {
-  newChat();
+    newChat();
 } else {
-  const latest =
-    [...chats].sort(
-      (a, b) =>
-        b.updated - a.updated
-    )[0];
+    chats.sort(
+        (a, b) =>
+            b.updated - a.updated
+    );
 
-  openChat(latest.id);
+    openChat(
+        chats[0].id
+    );
 }
 
 bindSuggestions();
-
 loadModels();
-
 health();
 
-/*
- * Periodic health check.
- * This does NOT create a worker
- * or background thread.
- */
 setInterval(
-  health,
-  30000
+    health,
+    30000
 );
