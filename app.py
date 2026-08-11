@@ -424,7 +424,7 @@ TOOLS_SCHEMA = [
 
 app = FastAPI(
     title=APP_NAME,
-    version="4.1.0",
+    version="4.2.0",
 )
 
 app.mount(
@@ -571,6 +571,25 @@ def safe_path(
         )
 
     return candidate
+
+
+def require_chat_root(
+    chat_id: str,
+) -> Path:
+
+    try:
+
+        return chat_root(
+            chat_id
+        )
+
+    except ValueError as exc:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
 
 
 # ============================================================
@@ -1236,150 +1255,200 @@ def is_transient_error(
 
 
 # ============================================================
-# SINGLE MODEL STREAM
+# MODEL CALL PRODUCER
 # ============================================================
 
-async def call_model_stream(
+async def run_model_round(
     client: AsyncOpenAI,
     model: str,
     messages: list[
         dict[str, Any]
     ],
     tools_enabled: bool,
-) -> tuple[
-    str,
-    dict[int, dict[str, str]],
-    bool,
-]:
+    queue: asyncio.Queue,
+) -> None:
+    """
+    Run one model call and push incremental results
+    into the queue:
 
-    kwargs = {
-        "model": model,
-        "messages": messages,
-        "stream": True,
-    }
+        ("token", text)
+        ("complete", assistant_text, tool_calls)
+        ("failed", exception)
 
-    if tools_enabled:
-        kwargs[
-            "tools"
-        ] = TOOLS_SCHEMA
+    Content tokens are forwarded the moment they arrive
+    so the UI streams in real time. Failures are reported
+    through the queue so the caller decides whether to
+    retry, fall back to another model, or surface the
+    error (partial answers included).
+    """
 
-    logger.info(
-        "AI request started | "
-        "model=%s | tools=%s",
-        model,
-        tools_enabled,
-    )
+    try:
 
-    response = (
-        await client.chat.completions.create(
-            **kwargs
-        )
-    )
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+        }
 
-    assistant_text = ""
-    tool_calls = {}
-    got_any_chunk = False
+        if tools_enabled:
+            kwargs[
+                "tools"
+            ] = TOOLS_SCHEMA
 
-    async for chunk in response:
-
-        got_any_chunk = True
-
-        if not chunk.choices:
-            continue
-
-        delta = (
-            chunk.choices[0].delta
+        logger.info(
+            "AI request started | "
+            "model=%s | tools=%s",
+            model,
+            tools_enabled,
         )
 
-        content = getattr(
-            delta,
-            "content",
-            None,
+        response = (
+            await client.chat.completions.create(
+                **kwargs
+            )
         )
 
-        if content:
-            assistant_text += content
+        assistant_text = ""
+        tool_calls = {}
+        finish_reason = None
 
-        incoming = getattr(
-            delta,
-            "tool_calls",
-            None,
-        )
+        async for chunk in response:
 
-        if incoming:
+            if not chunk.choices:
+                continue
 
-            for tool_call in incoming:
+            choice_finish = getattr(
+                chunk.choices[0],
+                "finish_reason",
+                None,
+            )
 
-                index = getattr(
-                    tool_call,
-                    "index",
-                    0,
+            if choice_finish:
+                finish_reason = choice_finish
+
+            delta = (
+                chunk.choices[0].delta
+            )
+
+            content = getattr(
+                delta,
+                "content",
+                None,
+            )
+
+            if content:
+                assistant_text += content
+                await queue.put(
+                    ("token", content)
                 )
 
-                entry = (
-                    tool_calls.setdefault(
-                        index,
-                        {
-                            "id": None,
-                            "name": "",
-                            "arguments": "",
-                        },
+            incoming = getattr(
+                delta,
+                "tool_calls",
+                None,
+            )
+
+            if incoming:
+
+                for tool_call in incoming:
+
+                    index = getattr(
+                        tool_call,
+                        "index",
+                        0,
                     )
-                )
 
-                if getattr(
-                    tool_call,
-                    "id",
-                    None,
-                ):
-                    entry[
-                        "id"
-                    ] = tool_call.id
+                    entry = (
+                        tool_calls.setdefault(
+                            index,
+                            {
+                                "id": None,
+                                "name": "",
+                                "arguments": "",
+                            },
+                        )
+                    )
 
-                function = getattr(
-                    tool_call,
-                    "function",
-                    None,
-                )
+                    if getattr(
+                        tool_call,
+                        "id",
+                        None,
+                    ):
+                        entry[
+                            "id"
+                        ] = tool_call.id
 
-                if function:
-
-                    name = getattr(
-                        function,
-                        "name",
+                    function = getattr(
+                        tool_call,
+                        "function",
                         None,
                     )
 
-                    arguments = getattr(
-                        function,
-                        "arguments",
-                        None,
-                    )
+                    if function:
 
-                    if name:
-                        entry[
-                            "name"
-                        ] = name
+                        name = getattr(
+                            function,
+                            "name",
+                            None,
+                        )
 
-                    if arguments:
-                        entry[
-                            "arguments"
-                        ] += arguments
+                        arguments = getattr(
+                            function,
+                            "arguments",
+                            None,
+                        )
 
-    if (
-        not got_any_chunk
-        and not tool_calls
-    ):
-        raise RuntimeError(
-            "The AI gateway returned "
-            "an empty stream."
+                        if name:
+                            entry[
+                                "name"
+                            ] = name
+
+                        if arguments:
+                            entry[
+                                "arguments"
+                            ] += arguments
+
+        if (
+            not assistant_text.strip()
+            and not tool_calls
+        ):
+            raise RuntimeError(
+                "The AI gateway returned "
+                "no usable response."
+            )
+
+        # ------------------------------------------------
+        # Truncation detection: a healthy completion ends
+        # with a finish_reason ("stop"/"tool_calls"). If
+        # the stream closed early without one, the answer
+        # is partial — never report it as complete.
+        # ------------------------------------------------
+
+        if (
+            finish_reason is None
+            and not tool_calls
+        ):
+            raise RuntimeError(
+                "The AI stream ended before "
+                "the model completed the "
+                "response (truncated)."
+            )
+
+        await queue.put(
+            (
+                "complete",
+                assistant_text,
+                tool_calls,
+            )
         )
 
-    return (
-        assistant_text,
-        tool_calls,
-        got_any_chunk,
-    )
+    except asyncio.CancelledError:
+        raise
+
+    except Exception as exc:
+        await queue.put(
+            ("failed", exc)
+        )
 
 
 # ============================================================
@@ -1482,68 +1551,84 @@ async def stream_chat(
             ]
         )
 
-        transient_failures = 0
+        attempt = 0
 
-        while (
-            transient_failures
-            <= AI_RETRIES
-        ):
+        while attempt <= AI_RETRIES:
+
+            # ------------------------------------------------
+            # Run one model call with true incremental
+            # streaming. Tokens are forwarded to the client
+            # as they arrive; failures before any token was
+            # delivered trigger the retry / fallback logic.
+            # ------------------------------------------------
+
+            queue = asyncio.Queue()
+
+            task = asyncio.create_task(
+                run_model_round(
+                    client,
+                    current_model,
+                    messages,
+                    tools_enabled,
+                    queue,
+                )
+            )
+
+            streamed_tokens = False
+            outcome = None
 
             try:
 
-                (
-                    assistant_text,
-                    tool_calls,
-                    _,
-                ) = await asyncio.wait_for(
-                    call_model_stream(
-                        client,
-                        current_model,
-                        messages,
-                        tools_enabled,
-                    ),
-                    timeout=AI_TIMEOUT,
-                )
+                while True:
 
-                # ------------------------------------------------
-                # If the gateway accepted the request but returned
-                # no text and no tools, don't silently finish.
-                # ------------------------------------------------
+                    try:
+                        item = await asyncio.wait_for(
+                            queue.get(),
+                            timeout=AI_TIMEOUT,
+                        )
+                    except asyncio.TimeoutError:
+                        outcome = (
+                            "failed",
+                            RuntimeError(
+                                "The AI request timed "
+                                "out waiting for data."
+                            ),
+                        )
+                        break
 
-                if (
-                    not assistant_text.strip()
-                    and not tool_calls
+                    if item[0] == "token":
+                        streamed_tokens = True
+                        yield sse(
+                            "token",
+                            {"text": item[1]},
+                        )
+                    else:
+                        outcome = item
+                        break
+
+            finally:
+
+                if not task.done():
+                    task.cancel()
+
+                try:
+                    await task
+                except (
+                    asyncio.CancelledError,
+                    Exception,
                 ):
-                    raise RuntimeError(
-                        "AI gateway returned "
-                        "no usable response."
-                    )
+                    pass
 
-                # ------------------------------------------------
-                # Stream text AFTER the successful model call.
-                #
-                # We intentionally buffer the model call above so
-                # transient gateway failures don't leave the UI
-                # with half a broken answer.
-                # ------------------------------------------------
+            # ------------------------------------------------
+            # Successful model response
+            # ------------------------------------------------
 
-                if assistant_text:
+            if outcome[0] == "complete":
 
-                    # Send the complete answer as one coherent
-                    # logical event. The frontend can render it
-                    # continuously without receiving broken fragments.
-                    yield sse(
-                        "token",
-                        {
-                            "text":
-                                assistant_text
-                        },
-                    )
+                assistant_text = outcome[1]
+                tool_calls = outcome[2]
 
-                # ------------------------------------------------
                 # No tool calls = completed answer.
-                # ------------------------------------------------
-
                 if not tool_calls:
 
                     yield sse(
@@ -1673,156 +1758,172 @@ async def stream_chat(
                         }
                     )
 
-                # Tools succeeded. Continue the agent loop.
+                # Tools executed. Continue the agent loop.
                 break
 
-            except Exception as exc:
+            # ------------------------------------------------
+            # Failure handling
+            # ------------------------------------------------
 
-                message = error_text(
-                    exc
-                )
+            exc = outcome[1]
 
-                logger.error(
-                    "AI gateway failure | "
-                    "model=%s | "
-                    "round=%s | "
-                    "attempt=%s/%s | "
-                    "%s",
-                    current_model,
-                    round_index + 1,
-                    transient_failures + 1,
-                    AI_RETRIES + 1,
-                    message,
-                )
+            message = error_text(
+                exc
+            )
 
-                # ------------------------------------------------
-                # Tool compatibility fallback
-                # ------------------------------------------------
+            logger.error(
+                "AI gateway failure | "
+                "model=%s | "
+                "round=%s | "
+                "attempt=%s/%s | "
+                "%s",
+                current_model,
+                round_index + 1,
+                attempt + 1,
+                AI_RETRIES + 1,
+                message,
+            )
 
-                if (
-                    tools_enabled
-                    and any(
-                        marker in str(
-                            exc
-                        ).lower()
-                        for marker in (
-                            "tool",
-                            "function",
-                            "invalid_request_error",
-                        )
-                    )
-                ):
-
-                    tools_enabled = False
-
-                    yield sse(
-                        "status",
-                        {
-                            "message":
-                                "This model "
-                                "does not accept "
-                                "the current tool "
-                                "format. Retrying "
-                                "without tools…"
-                        },
-                    )
-
-                    transient_failures = 0
-
-                    continue
-
-                # ------------------------------------------------
-                # Temporary gateway failure
-                # ------------------------------------------------
-
-                if is_transient_error(
-                    exc
-                ):
-
-                    if (
-                        transient_failures
-                        < AI_RETRIES
-                    ):
-
-                        wait_seconds = min(
-                            2 ** transient_failures,
-                            8,
-                        )
-
-                        yield sse(
-                            "status",
-                            {
-                                "message":
-                                    "The AI gateway "
-                                    "is temporarily "
-                                    "unavailable. "
-                                    f"Retrying "
-                                    f"({transient_failures + 1}/"
-                                    f"{AI_RETRIES})…"
-                            },
-                        )
-
-                        await asyncio.sleep(
-                            wait_seconds
-                        )
-
-                        transient_failures += 1
-
-                        continue
-
-                    # ------------------------------------------------
-                    # Try a fallback model.
-                    # ------------------------------------------------
-
-                    if (
-                        model_index
-                        + 1
-                        < len(
-                            model_attempts
-                        )
-                    ):
-
-                        model_index += 1
-
-                        fallback_model = (
-                            model_attempts[
-                                model_index
-                            ]
-                        )
-
-                        yield sse(
-                            "status",
-                            {
-                                "message":
-                                    "The selected "
-                                    "model is "
-                                    "temporarily "
-                                    "unavailable. "
-                                    "Trying a "
-                                    "fallback model…",
-                                "model":
-                                    fallback_model,
-                            },
-                        )
-
-                        break
-
-                # ------------------------------------------------
-                # Non-transient error
-                # ------------------------------------------------
+            # A partial answer already reached the user.
+            # Keep it and surface the interruption instead
+            # of retrying into a duplicated answer.
+            if streamed_tokens:
 
                 yield sse(
                     "error",
                     {
                         "message":
                             (
-                                "AI gateway error: "
+                                "The AI stream was "
+                                "interrupted: "
                                 + message
                             )
                     },
                 )
 
                 return
+
+            lowered = str(exc).lower()
+
+            # ------------------------------------------------
+            # Tool compatibility fallback
+            # ------------------------------------------------
+
+            if (
+                tools_enabled
+                and (
+                    "tool" in lowered
+                    or "function" in lowered
+                )
+            ):
+
+                tools_enabled = False
+
+                yield sse(
+                    "status",
+                    {
+                        "message":
+                            "This model "
+                            "does not accept "
+                            "the current tool "
+                            "format. Retrying "
+                            "without tools…"
+                    },
+                )
+
+                attempt += 1
+
+                continue
+
+            # ------------------------------------------------
+            # Temporary gateway failure
+            # ------------------------------------------------
+
+            if is_transient_error(
+                exc
+            ):
+
+                if attempt < AI_RETRIES:
+
+                    wait_seconds = min(
+                        2 ** attempt,
+                        8,
+                    )
+
+                    yield sse(
+                        "status",
+                        {
+                            "message":
+                                "The AI gateway "
+                                "is temporarily "
+                                "unavailable. "
+                                f"Retrying "
+                                f"({attempt + 1}/"
+                                f"{AI_RETRIES})…"
+                        },
+                    )
+
+                    await asyncio.sleep(
+                        wait_seconds
+                    )
+
+                    attempt += 1
+
+                    continue
+
+                # ------------------------------------------------
+                # Try a fallback model.
+                # ------------------------------------------------
+
+                if (
+                    model_index
+                    + 1
+                    < len(
+                        model_attempts
+                    )
+                ):
+
+                    model_index += 1
+
+                    fallback_model = (
+                        model_attempts[
+                            model_index
+                        ]
+                    )
+
+                    yield sse(
+                        "status",
+                        {
+                            "message":
+                                "The selected "
+                                "model is "
+                                "temporarily "
+                                "unavailable. "
+                                "Trying a "
+                                "fallback model…",
+                            "model":
+                                fallback_model,
+                        },
+                    )
+
+                    break
+
+            # ------------------------------------------------
+            # Non-transient error
+            # ------------------------------------------------
+
+            yield sse(
+                "error",
+                {
+                    "message":
+                        (
+                            "AI gateway error: "
+                            + message
+                        )
+                },
+            )
+
+            return
 
         else:
 
@@ -1880,7 +1981,7 @@ async def health():
             bool(API_KEY),
         "agent": True,
         "agent_version":
-            "4.1.0",
+            "4.2.0",
         "tool_rounds":
             MAX_TOOL_ROUNDS,
         "gateway":
@@ -1946,7 +2047,7 @@ async def chat_stream(
             ),
         )
 
-    chat_root(
+    require_chat_root(
         req.chat_id
     )
 
@@ -1976,7 +2077,7 @@ async def upload(
     ] = File(...),
 ):
 
-    root = chat_root(
+    root = require_chat_root(
         chat_id
     )
 
@@ -2054,7 +2155,7 @@ async def download(
     req: DownloadRequest
 ):
 
-    root = chat_root(
+    root = require_chat_root(
         req.chat_id
     )
 
@@ -2153,7 +2254,7 @@ async def download(
             "chat_id":
                 req.chat_id,
             "agent_runtime":
-                "AI Canvas Agent v4.1",
+                "AI Canvas Agent v4.2",
             "files":
                 {},
         }

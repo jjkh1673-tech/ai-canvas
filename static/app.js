@@ -379,19 +379,31 @@ function addTool(name, result) {
                     ⚙ ${escapeHtml(name)}
                 </b>
 
-                <span>
-                    ${escapeHtml(result).slice(0, 900)}
-                </span>
+                <span></span>
 
             </div>
 
         </div>
     `;
 
+    const span =
+        row.querySelector(".tool-card span");
+
+    span.textContent =
+        String(result ?? "").slice(0, 900);
+
     chatEl.appendChild(row);
 
     chatEl.scrollTop =
         chatEl.scrollHeight;
+
+    return {
+        name,
+        update(text) {
+            span.textContent =
+                String(text ?? "").slice(0, 900);
+        }
+    };
 }
 
 function newChat() {
@@ -888,6 +900,13 @@ async function send(text) {
     let finished = false;
     let gotToken = false;
 
+    /*
+     * Live tool cards keyed by tool name so
+     * tool_result updates the matching
+     * "Running…" card instead of duplicating it.
+     */
+    const liveTools = [];
+
     const controller =
         new AbortController();
 
@@ -1015,11 +1034,13 @@ async function send(text) {
                             event ===
                             "tool_start"
                         ) {
-                            addTool(
+                            const card = addTool(
                                 data?.name ||
                                     "tool",
                                 "Running…"
                             );
+
+                            liveTools.push(card);
 
                             return;
                         }
@@ -1028,12 +1049,32 @@ async function send(text) {
                             event ===
                             "tool_result"
                         ) {
-                            addTool(
+                            const name =
                                 data?.name ||
-                                    "tool",
-                                data?.result ||
-                                    ""
-                            );
+                                    "tool";
+
+                            /*
+                             * Update the matching running
+                             * card; fall back to a new card
+                             * if none is open.
+                             */
+                            const index = liveTools
+                                .findLastIndex(
+                                    t => t.name === name
+                                );
+
+                            if (index >= 0) {
+                                liveTools[index].update(
+                                    data?.result || ""
+                                );
+
+                                liveTools.splice(index, 1);
+                            } else {
+                                addTool(
+                                    name,
+                                    data?.result || ""
+                                );
+                            }
 
                             return;
                         }
